@@ -1,18 +1,17 @@
 #![allow(dead_code)]
 
-use std::path::PathBuf;
 use std::usize;
 
-use nom::branch::{alt, permutation};
-use nom::bytes::complete::{tag, take, take_till, take_until, take_while};
+use nom::branch::alt;
+use nom::bytes::complete::{tag, take, take_till, take_until};
 use nom::bytes::streaming::is_not;
-use nom::character::complete::{alphanumeric1, digit1, hex_digit1, multispace0, oct_digit1};
+use nom::character::complete::{digit1, hex_digit1, multispace0, oct_digit1};
 use nom::character::streaming::{char, multispace1};
 use nom::combinator::{map, opt, value, verify};
 use nom::error::{ErrorKind, ParseError};
 use nom::multi::{fold_many0, many0};
 use nom::sequence::{delimited, preceded};
-use nom::{AsChar, Err, IResult, InputTake, InputTakeAtPosition, Parser};
+use nom::{AsChar, Err, IResult, InputTakeAtPosition, Parser};
 
 /// Parse an escaped character: \n, \t, \r, \u{00AC}, etc.
 fn parse_escaped_char<'a, E>(input: &'a str) -> IResult<&'a str, char, E>
@@ -1369,9 +1368,9 @@ where
   E: ParseError<&'a str>,
 {
     let (input, _) = multispace0(input)?;
-    let (input, body) = take_until_balanced("/#", "#/")(input)?;
-    let (body, _) = take(2_usize)(body)?;
-    let body = &body[..body.len() - 2];
+    let (input, _) = take_until_balanced("/#", "#/")(input)?;
+    //let (body, _) = take(2_usize)(body)?;
+    //let body = &body[..body.len() - 2];
     //dbg!(body);
     //let (_, statements) = many0(parse_statement)(body)?;
 
@@ -1386,39 +1385,6 @@ fn main() {
     let source = source.chars().filter(|c| *c != '\t').collect::<String>();
     //dbg!(&source);
     
-let test = "fileprint_end()
-{
-	 /#
-	assert( !IsDefined( level.fileprint_entitystart ) );
-	saved = closefile( level.fileprint );
-	if (saved != 1)
-	{
-		println(\"-----------------------------------\");
-		println(\" \");
-		println(\"file write failure\");
-		println(\"file with name: \"+level.fileprint_filename);
-		println(\"make sure you checkout the file you are trying to save\");
-		println(\"note: USE P4 Search to find the file and check that one out\");
-		println(\"      Do not checkin files in from the xenonoutput folder, \");
-		println(\"      this is junctioned to the proper directory where you need to go\");
-		println(\"junctions looks like this\");
-		println(\" \");
-		println(\"..\\xenonOutput\\scriptdata\\createfx      ..\\share\\raw\\maps\\createfx\");
-		println(\"..\\xenonOutput\\scriptdata\\createart     ..\\share\\raw\\maps\\createart\");
-		println(\"..\\xenonOutput\\scriptdata\\vision        ..\\share\\raw\\vision\");
-		println(\"..\\xenonOutput\\scriptdata\\scriptgen     ..\\share\\raw\\maps\\scriptgen\");
-		println(\"..\\xenonOutput\\scriptdata\\zone_source   ..\\xenon\\zone_source\");
-		println(\"..\\xenonOutput\\accuracy                  ..\\share\\raw\\accuracy\");
-		println(\"..\\xenonOutput\\scriptdata\\map_source    ..\\map_source\\xenon_export\");
-		println(\" \");
-		println(\"-----------------------------------\");
-		
-		println( \"File not saved( see console.log for info ) \" );
-	}
-	level.fileprint = undefined;
-	level.fileprint_filename = undefined;
-	#/ 
-}";
     ////dbg!(parse_expression::<()>(test).unwrap());
     ////dbg!(parse_statement::<()>(test).unwrap());
     ////dbg!(parse_function_def::<()>(test).unwrap());
