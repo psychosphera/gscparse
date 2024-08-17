@@ -6,3 +6,8 @@ edition = "2021"
 [dependencies]
 comment-strip = "0.1.3"
 nom = "7.1.3"
+serde = { version = "1.0.208", optional = true }
+serde_derive = { version = "1.0.208", optional = true }
+
+[features]
+serde = [ "dep:serde", "dep:serde_derive" ]

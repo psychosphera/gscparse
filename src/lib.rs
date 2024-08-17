@@ -1,17 +1,30 @@
 #![allow(dead_code)]
 
+// TODO
+//
+// fix parsing of dev blocks
+//
+// probably other fixes
+// 
+// tidy up
+//
+// docs
+
 use std::usize;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take, take_till, take_until};
 use nom::bytes::streaming::is_not;
-use nom::character::complete::{digit1, hex_digit1, multispace0, oct_digit1};
+use nom::character::complete::{digit0, digit1, hex_digit1, multispace0, oct_digit1};
 use nom::character::streaming::{char, multispace1};
 use nom::combinator::{map, opt, value, verify};
 use nom::error::{ErrorKind, ParseError};
 use nom::multi::{fold_many0, many0};
 use nom::sequence::{delimited, preceded};
 use nom::{Err, IResult, Parser};
+
+#[cfg(feature = "serde")]
+use serde_derive::{Serialize, Deserialize};
 
 /// Parse an escaped character: \n, \t, \r, etc.
 pub fn parse_escaped_char<'a, E>(input: &'a str) -> IResult<&'a str, char, E>
@@ -117,40 +130,80 @@ where
   delimited(char('"'), build_string, char('"')).parse(input)
 }
 
-pub fn parse_hex_literal<'a, E>(input: &'a str) -> IResult<&'a str, u32, E>
+pub fn parse_hex_literal<'a, E>(input: &'a str) -> IResult<&'a str, i32, E>
 where
   E: ParseError<&'a str>,
 {
     let (input, _) = tag("0x")(input)?;
     let (input, hex) = hex_digit1(input)?;
 
-    Ok((input, u32::from_str_radix(hex, 16).unwrap()))
+    Ok((input, i32::from_str_radix(hex, 16).unwrap()))
 }
 
-pub fn parse_oct_literal<'a, E>(input: &'a str) -> IResult<&'a str, u32, E>
+pub fn parse_oct_literal<'a, E>(input: &'a str) -> IResult<&'a str, i32, E>
 where
   E: ParseError<&'a str>,
 {
     let (input, _) = char('0')(input)?;
     let (input, hex) = oct_digit1(input)?;
 
-    Ok((input, u32::from_str_radix(hex, 8).unwrap()))
+    Ok((input, i32::from_str_radix(hex, 8).unwrap()))
 }
 
-pub fn parse_dec_literal<'a, E>(input: &'a str) -> IResult<&'a str, u32, E>
+pub fn parse_dec_literal<'a, E>(input: &'a str) -> IResult<&'a str, i32, E>
 where
   E: ParseError<&'a str>,
 {
     let (input, hex) = digit1(input)?;
 
-    Ok((input, u32::from_str_radix(hex, 10).unwrap()))
+    Ok((input, i32::from_str_radix(hex, 10).unwrap()))
 }
 
-pub fn parse_int_literal<'a, E>(input: &'a str) -> IResult<&'a str, u32, E>
+pub fn parse_int_literal<'a, E>(input: &'a str) -> IResult<&'a str, i32, E>
 where
   E: ParseError<&'a str>,
 {
     alt((parse_hex_literal, parse_oct_literal, parse_dec_literal)).parse(input)
+}
+
+pub fn parse_float_literal<'a, E>(input: &'a str) -> IResult<&'a str, f32, E>
+where
+  E: ParseError<&'a str>,
+{
+    let (input, flt) = take_till(|c: char| c.is_ascii_whitespace() || c == ')' || c == ']')(input)?;
+
+    let flt = if flt.contains(".") {
+        let parts = flt.split(".").collect::<Vec<_>>();
+        if parts.len() > 2 {
+            return Err(Err::Error(E::from_error_kind(input, ErrorKind::TakeUntil)));
+        }
+
+        // one can be empty (i.e. .300 and 300. are valid), but both can't
+        if parts[0].is_empty() && parts[1].is_empty() {
+            return Err(Err::Error(E::from_error_kind(input, ErrorKind::TakeUntil)));
+        }
+
+        let (rem, _) = digit0(parts[0])?;
+        if !rem.is_empty() {
+            return Err(Err::Error(E::from_error_kind(input, ErrorKind::TakeUntil)));
+        }
+
+        let (rem, _) = digit0(parts[1])?; {
+            if !rem.is_empty() {
+                return Err(Err::Error(E::from_error_kind(input, ErrorKind::TakeUntil)));
+            }   
+        }
+        flt
+    } else {
+        let (rem, _) = digit1(flt)?;
+        if !rem.is_empty() {
+            return Err(Err::Error(E::from_error_kind(input, ErrorKind::TakeUntil)));
+        }
+        flt
+    };
+
+    //dbg!(flt);
+    Ok((input, flt.parse().unwrap()))
 }
 
 pub fn take_until_balanced<'a, E>(
@@ -204,11 +257,21 @@ where
         return Err(Err::Error(E::from_error_kind(input, ErrorKind::TakeUntil)));
     }
     let (input, _) = multispace0(input)?;
-    let (input, s) = opt(take_until(","))(input)?;
+    let (input, s) = if input.starts_with("(") {
+        let pos = input.find(")").ok_or(Err::Error(E::from_error_kind(input, ErrorKind::TakeUntil)))?;
+        if let Some(comma) = input[pos..].find(",") {
+            (&input[..comma], Some(&input[comma + 1..]))
+        } else {
+            (input, None)
+        }
+    } else {
+        opt(take_until(","))(input)?
+    };
+    
     let (input, s) = if let Some(s) = s {
         (input, s)
     } else {
-        ("", input)
+        ("", &input[..input.len() - 1])
     };
     // take the comma, unless it's the last arg so there isn't one
     let (input, _) = opt(take(1_usize))(input)?;
@@ -222,10 +285,11 @@ where
   E: ParseError<&'a str>,
 {
     let (input, v) = many0(parse_comma_separated_list_item)(input)?;
+    let v = v.into_iter().filter(|s| !s.is_empty()).collect();
     Ok((input, v))
 }
 
-static RESERVED_KEYWORDS: [&str; 9] = [
+static RESERVED_KEYWORDS: [&str; 11] = [
     "if",
     "for",
     "while",
@@ -235,8 +299,19 @@ static RESERVED_KEYWORDS: [&str; 9] = [
     "undefined",
     "true",
     "false",
+    "wait",
+    "thread",
 ];
 
+/// An identifier.
+/// 
+/// Essentially just wraps a [`String`] and ensures the identifier is valid.
+/// Valid identifiers can only contain alphanumeric characters and underscore,
+/// can only begin with a letter or underscore, and cannot consist solely of 
+/// underscores.
+/// 
+/// Function names and variable names are both identifiers.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 #[repr(transparent)]
 pub struct Ident(String);
@@ -276,6 +351,7 @@ impl Ident {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 #[repr(transparent)]
 pub struct ExternalIdent(String);
@@ -366,21 +442,18 @@ where
     Ok((input, ident))
 }
 
+/// A simple value.
+/// 
+/// Can be an identifier, a string or int literal, a boolean value, an array 
+/// list, an array or struct access, etc.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 pub enum Value {
     Name(Ident),
     ExternalName(ExternalIdent),
-    IntLiteral(u32),
+    IntLiteral(i32),
+    FloatLiteral(f32),
     StringLiteral(String),
-    MemberAccess {
-        parent: Box<Expression>,
-        child: Box<Expression>,
-    },
-    ArrayMember {
-        name: Ident,
-        index: Box<Expression>,
-    },
-    ArrayList(Vec<Expression>),
     Undefined,
     Bool(bool),
 }
@@ -393,73 +466,36 @@ where
         return Ok((input, Value::IntLiteral(i)));
     }
 
-    if input.starts_with("[") {
-        if input.starts_with("[]") {
-            let (input, _) = take("[]".len())(input)?;
-            return Ok((input, Value::ArrayList(vec![])));
-        }
-        let (input, list) = take_until_balanced("[", "]")(input)?;
-        let (list, _) = take(1_usize)(list)?;
-        let (_, values) = parse_comma_separated_list(list)?;
-        let values = values.into_iter().map(|v| parse_expression(v).map(|(_, v)| v)).collect::<Result<Vec<_>, _>>()?;
-        return Ok((input, Value::ArrayList(values)));
-    }
-
-    if input.contains(".") && input.find(".").unwrap() < input.find("[").unwrap_or(usize::MAX) {
-        let (input, slhs) = take_until(".")(input)?;
-        let slhs = slhs.trim();
-        let (input, _) = take(1_usize)(input)?;
-        let (input, _) = multispace0(input)?;
-
-        let (_, lhs) = parse_expression(slhs)?;
-        let (input, rhs) = parse_value(input)?;
-
-        let assignment = Value::MemberAccess { parent: Box::new(lhs), child: Box::new(Expression::Value(rhs)) };
-        return Ok((input, assignment))
+    if let Ok((input, i)) = parse_float_literal::<()>(input) {
+        return Ok((input, Value::FloatLiteral(i)));
     }
 
     if let Ok((input, name)) = parse_ident::<()>(input) {
-        let (input, _) = multispace0(input)?;
-        if input.starts_with("[") && !input.starts_with("[[") {
-            let (input, expr) = parse_array_subscript(input)?;
-            //dbg!(input);
-            return Ok((input, Value::ArrayMember { name, index: Box::new(expr) }));
-        }
-
         return Ok((input, Value::Name(name)));
     }
 
     if let Ok((input, name)) = parse_external_ident::<()>(input) {
         return Ok((input, Value::ExternalName(name)));
     }
-    
 
-    let v = if input.starts_with("undefined") {
-        Value::Undefined
+    if input.starts_with("undefined") {
+        let (input, _) = take("undefined".len())(input)?;
+        Ok((input, Value::Undefined))
     } else if input.starts_with("true") {
-        Value::Bool(true)
+        let (input, _) = take("true".len())(input)?;
+        Ok((input, Value::Bool(true)))
     } else if input.starts_with("false") {
-        Value::Bool(false)
+        let (input, _) = take("false".len())(input)?;
+        Ok((input, Value::Bool(false)))
     } else {
-        return Err(Err::Error(E::from_error_kind(input, ErrorKind::Fail)));
-    };
-
-    Ok((input, v))
+        Err(Err::Error(E::from_error_kind(input, ErrorKind::Fail)))
+    }
 }
 
-pub fn parse_array_subscript<'a, E>(input: &'a str) -> IResult<&'a str, Expression, E>
-where
-  E: ParseError<&'a str>,
-{
-    //dbg!(input);
-    let (input, subscript) = take_until_balanced("[", "]")(input)?;
-    let (subscript, _) = take(1_usize)(subscript)?;
-    let (subscript, _) = multispace0(subscript)?;
-    let (_, expr) = parse_expression(subscript)?;
-    //dbg!(input, &expr);
-    Ok((input, expr))
-}
-
+/// A semicolon-terminated [`Expression`], which may contain one or more 
+/// sub-[`Expression`]s or [`Value`]s, or a [`CompoundStatement`] (if, for, while, etc.),
+/// which may contain one or more sub-[`Statement`]s.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 pub enum Statement {
     Simple(Expression),
@@ -508,30 +544,59 @@ where
         return Ok((input, Statement::Compound(compound)));
     }
     
-    let (input, statement) = take_until(";")(input)?;
-    let (_, expr) = parse_expression(statement)?;
+    let (input, statement) = opt(take_until(";"))(input)?;
+    let statement = if let Some(statement) = statement {
+        statement
+    } else if input.ends_with(")") {
+        &input[..input.len() - 1]
+    } else {
+        input
+    };
+
+    let (statement, mut expr) = parse_expression(statement)?;
+    
+    let (mut statement, _) = multispace0(statement)?;
+    while !statement.is_empty() {
+        //dbg!(statement);
+        let (statement2, mut expr2) = parse_partial_expression(statement, &expr)?;
+        if let Expression::Call { .. } = expr2 {
+            expr2 = Expression::SelfCall { self_: Box::new(expr), call: Box::new(expr2) };
+        }
+ 
+        (statement, _) = multispace0(statement2)?;
+        expr = expr2;
+    }
+
     let (input, _) = take(1_usize)(input)?;
 
     Ok((input, Statement::Simple(expr)))
 }
 
+/// An if, else, while, or for loop, or a dev block.
+/// 
+/// They are "compound" in the sense that they are statements in themselves,
+/// but also may contain multiple statements, including other [`CompoundStatement`]s
+/// (e.g., nested if-statements).
+/// 
+/// `else if` gets parsed as two [`CompoundStatement`]s (else, then if).
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 pub enum CompoundStatement {
     If {
-        cond: Box<Expression>,
+        cond: Box<Statement>,
         body: Vec<Statement>,
     }, 
     Else {
         body: Vec<Statement>,
     },
     While {
-        cond: Box<Expression>,
+        cond: Box<Statement>,
         body: Vec<Statement>,
     },
     For {
-        init: Box<Expression>,
-        cond: Box<Expression>,
-        inc: Box<Expression>,
+        init: Box<Statement>,
+        cond: Box<Statement>,
+        inc: Box<Statement>,
         body: Vec<Statement>,
     },
     RangedFor {
@@ -572,7 +637,7 @@ where
     let (scond, _) = take(1_usize)(scond)?;
     let (scond, _) = multispace0(scond)?;
     
-    let (_, cond) = parse_expression(scond)?;
+    let (_, cond) = parse_statement(scond)?;
 
     let (input, _) = opt(multispace0)(input)?;
 
@@ -580,15 +645,16 @@ where
         let (input, block) = parse_block(input)?;
         Ok((input, CompoundStatement::If { cond: Box::new(cond), body: block.statements }))
     } else {
-        let (input, body) = take_until(";")(input)?;
-        let (input, _) = take(1_usize)(input)?;
+        let semicolon = input.find(";").ok_or(Err::Error(E::from_error_kind(input, ErrorKind::Fail)))?;
+        let (input, body) = (&input[semicolon + 1..], &input[..=semicolon]);
         let input = input.trim_start();
         let body = body.trim();
+        //dbg!(input, body);
         if body.is_empty() {
             return Ok((input, CompoundStatement::If { cond: Box::new(cond), body: vec![] }));
         }
-        let (_, expr) = parse_expression(body)?;
-        Ok((input, CompoundStatement::If { cond: Box::new(cond), body: vec![ Statement::Simple(expr) ] }))
+        let (_, statement) = parse_statement(body)?;
+        Ok((input, CompoundStatement::If { cond: Box::new(cond), body: vec![ statement ] }))
     }
 }
 
@@ -596,7 +662,7 @@ pub fn parse_else_statement<'a, E>(input: &'a str) -> IResult<&'a str, CompoundS
 where
   E: ParseError<&'a str>,
 {
-    let (input, _) = take("else ".len())(input)?;
+    let (input, _) = take("else".len())(input)?;
 
     let (input, _) = opt(multispace0)(input)?;
 
@@ -604,7 +670,7 @@ where
         let (input, block) = parse_block(input)?;
         Ok((input, CompoundStatement::Else { body: block.statements }))
     } else {
-        //dbg!(input);
+        ////dbg!(input);
         let (input, statement) = parse_statement(input)?;
         Ok((input, CompoundStatement::Else { body: vec![ statement ] }))
     }
@@ -621,16 +687,16 @@ where
     let (control, sinit) = take_until(";")(control)?;
     let (control, _) = take(1_usize)(control)?;
     let sinit = sinit.trim();
-    let (_, init) = parse_expression(sinit)?;
+    let (_, init) = parse_statement(sinit)?;
     
     let (control, scond) = take_until(";")(control)?;
     let (control, _) = take(1_usize)(control)?;
     let scond = scond.trim();
-    let (_, cond) = parse_expression(scond)?;
+    let (_, cond) = parse_statement(scond)?;
     
     let (_, sinc) = take_until(")")(control)?;
     let sinc = sinc.trim();
-    let (_, inc) = parse_expression(sinc)?;
+    let (_, inc) = parse_statement(sinc)?;
 
     let (input, _) = opt(multispace0)(input)?;
 
@@ -638,15 +704,15 @@ where
         let (input, block) = parse_block(input)?;
         Ok((input, CompoundStatement::For { init: Box::new(init), cond: Box::new(cond), inc: Box::new(inc), body: block.statements }))
     } else {
-        let (input, body) = take_until(";")(input)?;
-        let (input, _) = take(1_usize)(input)?;
+        let semicolon = input.find(";").ok_or(Err::Error(E::from_error_kind(input, ErrorKind::Fail)))?;
+        let (input, body) = (&input[..=semicolon], &input[semicolon + 1..]);
         let input = input.trim_start();
         let body = body.trim();
         if body.is_empty() {
             return Ok((input, CompoundStatement::For { init: Box::new(init), cond: Box::new(cond), inc: Box::new(inc), body: vec![] }));
         }
-        let (_, expr) = parse_expression(body)?;
-        Ok((input, CompoundStatement::For { init: Box::new(init), cond: Box::new(cond), inc: Box::new(inc), body: vec![ Statement::Simple(expr) ] }))
+        let (_, statement) = parse_statement(body)?;
+        Ok((input, CompoundStatement::For { init: Box::new(init), cond: Box::new(cond), inc: Box::new(inc), body: vec![ statement ] }))
     }
 }
 
@@ -659,37 +725,62 @@ where
     let (scond, _) = take(1_usize)(scond)?;
     let (scond, _) = multispace0(scond)?;
     
-    let (_, cond) = parse_expression(scond)?;
+    let (_, cond) = parse_statement(scond)?;
 
     let (input, _) = opt(multispace0)(input)?;
 
     if input.starts_with("{") {
         let (input, block) = parse_block(input)?;
-        Ok((input, CompoundStatement::If { cond: Box::new(cond), body: block.statements }))
+        Ok((input, CompoundStatement::While { cond: Box::new(cond), body: block.statements }))
     } else {
-        let (input, body) = take_until(";")(input)?;
-        let (input, _) = take(1_usize)(input)?;
+        let semicolon = input.find(";").ok_or(Err::Error(E::from_error_kind(input, ErrorKind::Fail)))?;
+        let (input, body) = (&input[semicolon + 1..], &input[..=semicolon]);
         let input = input.trim_start();
         let body = body.trim();
+        //dbg!(input, body);
         if body.is_empty() {
-            return Ok((input, CompoundStatement::If { cond: Box::new(cond), body: vec![] }));
+            return Ok((input, CompoundStatement::While { cond: Box::new(cond), body: vec![] }));
         }
-        let (_, expr) = parse_expression(body)?;
-        Ok((input, CompoundStatement::While { cond: Box::new(cond), body: vec![ Statement::Simple(expr) ] }))
+        let (_, statement) = parse_statement(body)?;
+        Ok((input, CompoundStatement::While { cond: Box::new(cond), body: vec![ statement ] }))
     }
 }
 
+/// An expression following the format `<lhs> <op> <rhs>` (assignment, 
+/// addition, etc.).
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 pub struct BinaryExpression {
     lhs: Box<Expression>,
     rhs: Box<Expression>,
 }
 
+/// The building block of a program.
+/// 
+/// Can be a unary or binary operation, a function call, a `break` or 
+/// `continue`, etc.
+/// 
+/// An expression may (and often will) contain sub-expressions.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 pub enum Expression {
     Parenthetized(Box<Expression>),
+    Tuple(Vec<Expression>),
+
+    StructAccess {
+        parent: Box<Expression>,
+        child: Box<Expression>,
+    },
+
+    ArrayAccess {
+        name: Box<Expression>,
+        index: Box<Expression>,
+    },
+
+    ArrayList(Vec<Expression>),
 
     Iteration {
+        thread: bool,
         ident: ExternalIdent,
         args: Vec<Expression>,
     },
@@ -699,6 +790,7 @@ pub enum Expression {
     },
 
     LogicalNot(Box<Expression>),
+    Negation(Box<Expression>),
     
     PrefixIncrement(Box<Expression>),
     PostfixIncrement(Box<Expression>),
@@ -740,6 +832,7 @@ pub enum Expression {
         call: Box<Expression>,
     },
     Return(Option<Box<Expression>>),
+    Wait(Box<Expression>),
     Break,
     Continue,
     Value(Value),
@@ -750,9 +843,18 @@ where
   E: ParseError<&'a str>,
 {
     let (input, _) = multispace0(input)?;
+    //dbg!(input);
 
     if input.starts_with("return") {
         return parse_return(input);
+    }
+
+    if input.starts_with("wait") {
+        return parse_wait(input);
+    }
+
+    if input.starts_with("!") {
+        return parse_logical_not(input);
     }
 
     if input.starts_with("(") {
@@ -761,6 +863,10 @@ where
 
     if input.starts_with("[[") {
         return parse_iteration_expression(input);
+    }
+
+    if input.starts_with("[") {
+        return parse_array_list::<E>(input).or(parse_array_subscript(input));
     }
 
     if input.starts_with("\"") {
@@ -775,18 +881,65 @@ where
     }
 
     if let Ok((input2, _)) = parse_ident::<(&str, ErrorKind)>(input) {
-        let (input2, _) = multispace0(input2)?;
-        //dbg!(input2);
         if input2.starts_with("(") {
-            return parse_call(input);
-        }
-    }
+            if let Ok((input, call)) = parse_call::<E>(input) {
+                let (input, call1) = if let Ok((input, subscript)) = parse_array_subscript::<E>(input) {
+                    (input, Expression::ArrayAccess { name: Box::new(call), index: Box::new(subscript) })
+                } else {
+                    (input, call)
+                };
+                //dbg!(&call1);
 
-    if let Ok((input2, _)) = parse_external_ident::<(&str, ErrorKind)>(input) {
+                let input = if let Ok((input2, _)) = multispace1::<&str, E>(input) {
+                    input2
+                } else {
+                    return Ok((input, call1));
+                };
+
+                if let Ok((input, call2)) = parse_call::<E>(input) {
+                    return Ok((input, Expression::SelfCall { self_: Box::new(call1), call: Box::new(call2) }));
+                }
+
+                if input.starts_with("thread ") {
+                    let (input, _) = take("thread ".len())(input)?;
+                    let (input, _) = multispace0(input)?;
+
+                    let (input, call2) = parse_call(input)?;
+                    return Ok((input, Expression::SelfCall { self_: Box::new(call1), call: Box::new(call2) }));
+                }
+
+                return Ok((input, call1));
+            }
+        }
+    } else if let Ok((input2, _)) = parse_external_ident::<(&str, ErrorKind)>(input) {
         let (input2, _) = multispace0(input2)?;
-        //dbg!(input2);
+        ////dbg!(input2);
         if input2.starts_with("(") {
-            return parse_call(input);
+            if let Ok((input, call)) = parse_call::<E>(input) {
+                let (input, call1) = if let Ok((input, subscript)) = parse_array_subscript::<E>(input) {
+                    (input, Expression::ArrayAccess { name: Box::new(call), index: Box::new(subscript) })
+                } else {
+                    (input, call)
+                };
+
+                let input = if let Ok((input2, _)) = multispace1::<&str, E>(input) {
+                    input2
+                } else {
+                    return Ok((input, call1));
+                };
+
+                if let Ok((input, call2)) = parse_call::<E>(input) {
+                    return Ok((input, Expression::SelfCall { self_: Box::new(call1), call: Box::new(call2) }));
+                }
+
+                if input.starts_with("thread ") {
+                    let (input, _) = take("thread ".len())(input)?;
+                    let (input, _) = multispace0(input)?;
+
+                    let (input, call2) = parse_call(input)?;
+                    return Ok((input, Expression::SelfCall { self_: Box::new(call1), call: Box::new(call2) }));
+                }
+            }
         }
     }
 
@@ -819,31 +972,58 @@ where
     
     if input.contains("+") && input.chars().nth(input.find("+").unwrap() + 1).unwrap() != '+'  {
         return parse_addition(input);
-    } else if input.contains("-") && input.chars().nth(input.find("-").unwrap() + 1).unwrap() != '-' {
+    } else if input.contains("-") && input.chars().nth(input.find("-").unwrap() + 1).unwrap() != '-' && !input.starts_with("-") {
         return parse_subtraction(input);
-    }
-
-    if input.starts_with("thread ") {
-        return parse_call(input);
     }
 
     if let Ok((input2, _)) = parse_ident::<(&str, ErrorKind)>(input) {
         let (input2, _) = multispace0(input2)?;
-        //dbg!(input2);
+        ////dbg!(input2);
         if input2.starts_with("(") {
             return parse_call(input);
-        } else if input2.starts_with("++") {
-            return parse_postfix_increment(input);
-        } else if input2.starts_with("--") {
-            return parse_postfix_decrement(input);
         }
     }
 
     if let Ok((input2, _)) = parse_external_ident::<(&str, ErrorKind)>(input) {
         let (input2, _) = multispace0(input2)?;
-        //dbg!(input2);
+        ////dbg!(input2);
         if input2.starts_with("(") {
             return parse_call(input);
+        }
+    }
+
+    if input.contains(".") && 
+        (input.chars().nth(0).unwrap().is_ascii_alphabetic() || input.chars().nth(0).unwrap() == '_') && 
+        input.find(".").unwrap() < input.find("[").unwrap_or(usize::MAX)
+    {
+        if let Ok((input, flt)) = parse_float_literal::<E>(input) {
+            return Ok((input, Expression::Value(Value::FloatLiteral(flt))));
+        }
+
+        let (input, slhs) = take_until(".")(input)?;
+        let slhs = slhs.trim();
+        let (input, _) = take(1_usize)(input)?;
+        let (input, _) = multispace0(input)?;
+
+        let (_, lhs) = parse_expression(slhs)?;
+        let (input, rhs) = parse_value(input)?;
+
+        let assignment = Expression::StructAccess { parent: Box::new(lhs), child: Box::new(Expression::Value(rhs)) };
+        //dbg!(&assignment);
+        return Ok((input, assignment))
+    }
+
+    if input.starts_with("thread ") {
+        return parse_call::<E>(input).or(parse_iteration_expression(input));
+    }
+
+    if let Ok((input2, _)) = parse_ident::<(&str, ErrorKind)>(input) {
+        let (input2, _) = multispace0(input2)?;
+        ////dbg!(input2);
+        if input2.starts_with("++") {
+            return parse_postfix_increment(input);
+        } else if input2.starts_with("--") {
+            return parse_postfix_decrement(input);
         }
     }
 
@@ -851,7 +1031,9 @@ where
         return parse_prefix_increment(input);
     } else if input.starts_with("--") {
         return parse_prefix_decrement(input);
-    }  else if input.starts_with("break ") || input.starts_with("break;") {
+    } else if input.starts_with("-") {
+        return parse_negation(input);
+    } else if input.starts_with("break ") || input.starts_with("break;") {
         let (input, _) = take("break ".len())(input)?;
         return Ok((input, Expression::Break));
     } else if input == "break" {
@@ -863,11 +1045,9 @@ where
     } else if input == "continue" {
         let (input, _) = take("continue".len())(input)?;
         return Ok((input, Expression::Continue));
-    } else if input.starts_with("!") {
-        return parse_logical_not(input);
     } 
         
-    //dbg!(input);
+    ////dbg!(input);
     let (input, value) = parse_value(input)?;
     if input.starts_with("++") {
         let (input, _) = take("++".len())(input)?;
@@ -875,14 +1055,17 @@ where
     } else if input.starts_with("--") {
         let (input, _) = take("--".len())(input)?;
         return Ok((input, Expression::PostfixDecrement(Box::new(Expression::Value(value)))))
+    } else if input.starts_with("[") {
+        let (input, subscript) = parse_array_subscript(input)?;
+        return Ok((input, Expression::ArrayAccess { name: Box::new(Expression::Value(value)), index: Box::new(subscript) }))
     }
 
     let value = Expression::Value(value);
-    //dbg!(input);
+    ////dbg!(input);
     
     let (input, _) = multispace0(input)?;
 
-    //dbg!(input);
+    ////dbg!(input);
     if let Ok((input, call)) = parse_call::<(&str, ErrorKind)>(input) {
         return Ok((input, Expression::SelfCall { self_: Box::new(value), call: Box::new(call) }));
     } else if let Ok((input, iteration)) = parse_iteration_expression::<(&str, ErrorKind)>(input) {
@@ -892,38 +1075,142 @@ where
     Ok((input, value))
 }
 
+pub fn parse_partial_expression<'a, E>(input: &'a str, prev_expression: &Expression) -> IResult<&'a str, Expression, E>
+where
+  E: ParseError<&'a str>,
+{
+    let (input, _) = multispace0(input)?;
+    //dbg!(input);
+
+    if input.starts_with("(") {
+        return parse_parenthetized_expression(input);
+    }
+
+    if input.starts_with("[") {
+        let (input, subscript) = parse_array_subscript(input)?;
+        return Ok((input, Expression::ArrayAccess { name: Box::new(prev_expression.clone()), index: Box::new(subscript) }));
+    }
+
+    let binary_expression_handlers = [
+        ("||", parse_partial_logical_or as fn(&'a str, &Expression) -> IResult<&'a str, Expression, E>),
+        ("&&", parse_partial_logical_and),
+        ("|",  parse_partial_bitwise_or),
+        ("&",  parse_partial_bitwise_and),
+        ("==", parse_partial_equal),
+        ("!=", parse_partial_not_equal),
+        ("<=", parse_partial_less_than_or_equal),
+        ("<",  parse_partial_less_than),
+        (">=", parse_partial_greater_than_or_equal),
+        (">",  parse_partial_greater_than),
+        ("+=", parse_partial_addition_assignment),
+        ("-=", parse_partial_subtraction_assignment),
+        ("*=", parse_partial_multiplication_assignment),
+        ("/=", parse_partial_division_assignment),
+        ("=",  parse_partial_assignment),
+        ("*",  parse_partial_multiplication),
+        ("/",  parse_partial_division),
+        ("%",  parse_partial_modulo),
+    ];
+
+    for (op, handler) in binary_expression_handlers.iter() {
+        if input.starts_with(op) {
+            //dbg!(input);
+            return handler(input, prev_expression);
+        }
+    }
+    
+    if input.starts_with("+") && !input.starts_with("++")  {
+        return parse_partial_addition(input, prev_expression);
+    } else if input.starts_with("++") {
+        let (input, _) = take("++".len())(input)?;
+        return Ok((input, Expression::PostfixIncrement(Box::new(prev_expression.clone()))));
+    } else if input.contains("-") && input.chars().nth(input.find("-").unwrap() + 1).unwrap() != '-' {
+        return parse_partial_subtraction(input, prev_expression);
+    } else if input.starts_with("--") {
+        let (input, _) = take("--".len())(input)?;
+        return Ok((input, Expression::PostfixDecrement(Box::new(prev_expression.clone()))));
+    } else if let Ok((input, call)) = parse_call::<E>(input) {
+        return Ok((input, call));
+    } else {
+        return Err(Err::Error(E::from_error_kind(input, ErrorKind::Fail)));
+    }
+
+}
+
 pub fn parse_parenthetized_expression<'a, E>(input: &'a str) -> IResult<&'a str, Expression, E>
 where
   E: ParseError<&'a str>,
 {
     //dbg!(input);
+
     let (input, sexpr) = take_until_balanced("(", ")")(input)?;
     let (sexpr, _) = take(1_usize)(sexpr)?;
+
     let (sexpr, _) = multispace0(sexpr)?;
     //dbg!(input, sexpr);
-    let (_, expr) = parse_expression(sexpr)?;
-    let expr = Expression::Parenthetized(Box::new(expr));
-    Ok((input, expr))
+    let (sexpr2, expr) = parse_expression(sexpr)?;
+    if !sexpr2.starts_with(",") {
+        return Ok((input, Expression::Parenthetized(Box::new(expr))));
+    }
+    
+    let (_, values) = parse_comma_separated_list(sexpr)?;
+    let exprs = values.into_iter().map(|s| parse_expression(s).map(|(_, e)| e)).collect::<Result<Vec<_>, _>>()?;
+    Ok((input, Expression::Tuple(exprs)))
 }
 
 pub fn parse_iteration_expression<'a, E>(input: &'a str) -> IResult<&'a str, Expression, E>
 where
   E: ParseError<&'a str>,
 {
-    //dbg!(input);
+    let (input, thread) = if input.starts_with("thread ") {
+        (&input["thread ".len()..], true)
+    } else {
+        (input, false)
+    };
+    let (input, _) = multispace0(input)?;
+    ////dbg!(input);
     let (input, sfunc) = take_until_balanced("[[", "]]")(input)?;
     let (sfunc, _) = take(2_usize)(sfunc)?;
     let (sfunc, _) = multispace0(sfunc)?;
-    //dbg!(input, sfunc);
+    ////dbg!(input, sfunc);
     let (_, func) = parse_external_ident(sfunc)?;
     let (input, args) = take_until_balanced("(", ")")(input)?;
     let (args, _) = take(1_usize)(args)?;
     let (_, args) = parse_comma_separated_list(args)?;
     let args = args.into_iter().map(|a| parse_expression(a).map(|(_, a)| a)).collect::<Result<Vec<_>, _>>()?;
     let expr = Expression::Iteration {
+        thread,
         ident: func,
         args,
     };
+    Ok((input, expr))
+}
+
+pub fn parse_array_list<'a, E>(input: &'a str) -> IResult<&'a str, Expression, E>
+where
+  E: ParseError<&'a str>,
+{
+    if input.starts_with("[]") {
+        let (input, _) = take("[]".len())(input)?;
+        return Ok((input, Expression::ArrayList(vec![])));
+    }
+    let (input, list) = take_until_balanced("[", "]")(input)?;
+    let (list, _) = take("[".len())(list)?;
+    let (_, values) = parse_comma_separated_list(list)?;
+    let values = values.into_iter().map(|v| parse_expression(v).map(|(_, v)| v)).collect::<Result<Vec<_>, _>>()?;
+    Ok((input, Expression::ArrayList(values)))
+}
+
+pub fn parse_array_subscript<'a, E>(input: &'a str) -> IResult<&'a str, Expression, E>
+where
+  E: ParseError<&'a str>,
+{
+    ////dbg!(input);
+    let (input, subscript) = take_until_balanced("[", "]")(input)?;
+    let (subscript, _) = take(1_usize)(subscript)?;
+    let (subscript, _) = multispace0(subscript)?;
+    let (_, expr) = parse_expression(subscript)?;
+    ////dbg!(input, &expr);
     Ok((input, expr))
 }
 
@@ -942,6 +1229,7 @@ macro_rules! parse_prefix_unary_expression {
 parse_prefix_unary_expression!(parse_logical_not, "!", Expression::LogicalNot);
 parse_prefix_unary_expression!(parse_prefix_increment, "++", Expression::PrefixIncrement);
 parse_prefix_unary_expression!(parse_prefix_decrement, "--", Expression::PrefixDecrement);
+parse_prefix_unary_expression!(parse_negation, "-", Expression::Negation);
 
 pub fn parse_prefix_unary_expression<'a, E>(input: &'a str, op: &'a str) -> IResult<&'a str, Expression, E>
 where
@@ -1025,6 +1313,53 @@ where
     Ok((input, (lhs, rhs)))
 }
 
+macro_rules! parse_partial_binary_expression {
+    ($name:ident, $op:literal, $ex:ident::$var:ident) => {
+        pub fn $name<'a, E>(input: &'a str, prev_expression: &Expression) -> IResult<&'a str, Expression, E>
+        where
+          E: ParseError<&'a str>,
+        {
+            let (input, (lhs, rhs)) = parse_partial_binary_expression(input, $op, prev_expression)?;
+            Ok((input, $ex::$var(BinaryExpression { lhs: Box::new(lhs), rhs: Box::new(rhs) } )))
+        }
+    };
+}
+
+parse_partial_binary_expression!(parse_partial_logical_or, "||", Expression::LogicalOr);
+parse_partial_binary_expression!(parse_partial_logical_and, "&&", Expression::LogicalAnd);
+parse_partial_binary_expression!(parse_partial_bitwise_or, "|", Expression::BitwiseOr);
+parse_partial_binary_expression!(parse_partial_bitwise_and, "&", Expression::BitwiseAnd);
+parse_partial_binary_expression!(parse_partial_assignment, "=", Expression::Assignment);
+parse_partial_binary_expression!(parse_partial_equal, "==", Expression::Equal);
+parse_partial_binary_expression!(parse_partial_not_equal, "!=", Expression::NotEqual);
+parse_partial_binary_expression!(parse_partial_less_than, "<", Expression::LessThan);
+parse_partial_binary_expression!(parse_partial_less_than_or_equal, "<=", Expression::LessThanOrEqual);
+parse_partial_binary_expression!(parse_partial_greater_than, ">", Expression::GreaterThan);
+parse_partial_binary_expression!(parse_partial_greater_than_or_equal, ">=", Expression::GreaterThanOrEqual);
+parse_partial_binary_expression!(parse_partial_addition, "+", Expression::Addition);
+parse_partial_binary_expression!(parse_partial_addition_assignment, "+=", Expression::AdditionAssignment);
+parse_partial_binary_expression!(parse_partial_subtraction, "-", Expression::Subtraction);
+parse_partial_binary_expression!(parse_partial_subtraction_assignment, "-=", Expression::SubtractionAssignment);
+parse_partial_binary_expression!(parse_partial_multiplication, "*", Expression::Multiplication);
+parse_partial_binary_expression!(parse_partial_multiplication_assignment, "*=", Expression::MultiplicationAssignment);
+parse_partial_binary_expression!(parse_partial_division, "/", Expression::Division);
+parse_partial_binary_expression!(parse_partial_division_assignment, "/=", Expression::DivisionAssignment);
+parse_partial_binary_expression!(parse_partial_modulo, "%", Expression::Modulo);
+
+pub fn parse_partial_binary_expression<'a, E>(input: &'a str, op: &'a str, prev_expression: &Expression) -> IResult<&'a str, (Expression, Expression), E>
+where
+  E: ParseError<&'a str>,
+{
+    let (input, _) = take(op.len())(input)?;
+    let (input, _) = multispace0(input)?;
+
+    //dbg!(input);
+    let (input, rhs) = parse_expression(input)?;
+
+    //dbg!(input);
+    Ok((input, (prev_expression.clone(), rhs)))
+}
+
 pub fn parse_call<'a, E>(input: &'a str) -> IResult<&'a str, Expression, E>
 where
   E: ParseError<&'a str>,
@@ -1036,16 +1371,16 @@ where
     } else {
         (input, false)
     };
-    //dbg!(input);
+    ////dbg!(input);
     let (input, ident) = parse_external_ident(input)?;
-    //dbg!(input, &ident);
+    ////dbg!(input, &ident);
     let (input, _) = opt(multispace0)(input)?;
     let (input, args) = take_until_balanced("(", ")")(input)?;
-    //dbg!(args);
+    ////dbg!(args);
     let (args, _) = take(1_usize)(args)?;
-    //dbg!(args);
+    ////dbg!(args);
     let (_, args) = many0(parse_arg)(args)?;
-    //dbg!(&args);
+    ////dbg!(&args);
     let call = Expression::Call { thread, name: ident, args };
     Ok((input, call))
 }
@@ -1063,13 +1398,42 @@ where
     Ok((input, Expression::Return(Some(Box::new(expr)))))
 }
 
+pub fn parse_wait<'a, E>(input: &'a str) -> IResult<&'a str, Expression, E>
+where
+  E: ParseError<&'a str>,
+{
+    let (input, _) = take("wait".len())(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, expr) = parse_expression(input)?;
+    Ok((input, Expression::Wait(Box::new(expr))))
+}
+
+/// An abstract syntax tree for `GSC`.
+/// 
+/// Thankfully, it's very simple in structure. At top-level, `GSC` only has 
+/// pseudo-preprocessor directives (`#include`, `#using_animtree`), which 
+/// resemble C preprocessor directives but are really just part of the syntax,
+/// and function definitions. There are no structure definitions, typedefs,
+/// function declarations, etc.
+/// 
+/// Function bodies may contain one or more [`Statement`]s, which in turn may
+/// contain one or more sub-[`Statement`]s or [`Expression`]s, which in turn may 
+/// contain one or more sub-[`Expression`]s or [`Value`]s.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 pub struct Ast {
     directives: Vec<Directive>,
     functions: Vec<FunctionDef>,
 }
 
-pub fn parse_script<'a, E>(input: &'a str) -> IResult<&'a str, Ast, E>
+/// Parses a script (`.gsc`, `.csc`, etc.) and returns an [`Ast`].
+pub fn parse_script(input: &str) -> Option<Ast> {
+    let input = comment_strip::strip_comments(input.to_string(), comment_strip::CommentStyle::C, true).unwrap();
+    let input = input.chars().filter(|c| *c != '\t').collect::<String>();
+    parse_script_internal::<()>(&input).map(|(_, a)| a).ok()
+}
+
+pub fn parse_script_internal<'a, E>(input: &'a str) -> IResult<&'a str, Ast, E>
 where
   E: ParseError<&'a str>,
 {
@@ -1091,6 +1455,7 @@ where
     Ok(("", Ast { directives, functions })) 
 }
 
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 pub enum Directive {
     Include(String),
@@ -1124,6 +1489,14 @@ where
     Ok((input, directives)) 
 }
 
+/// A function definition. 
+/// 
+/// Contains the name of the function, its arguments list, and its body.
+/// 
+/// Function bodies may contain one or more [`Statement`]s, which in turn may
+/// contain one or more sub-[`Statement`]s or [`Expression`]s, which in turn may 
+/// contain one or more sub-[`Expression`]s or [`Value`]s.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 pub struct FunctionDef {
     name: Ident,
@@ -1137,16 +1510,20 @@ where
 {
     let (input, _) = multispace0(input)?;
     let (input, name) = parse_ident(input)?;
-    //dbg!(&name);
+    ////dbg!(&name);
     let (input, args) = parse_args_list(input)?;
     let (input, body) = parse_block(input)?;
 
     Ok((input, FunctionDef { name, args, body }))
 }
 
+/// A list of arguments from a function declaration.
+/// 
+/// Can be empty.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 pub struct ArgsList {
-    args: Vec<Ident>,
+    pub args: Vec<Ident>,
 }
 
 pub fn parse_args_list<'a, E>(input: &'a str) -> IResult<&'a str, ArgsList, E>
@@ -1165,6 +1542,7 @@ where
   E: ParseError<&'a str>,
 {
     let (input, arg) = parse_arg(input)?;
+    //dbg!(&arg);
     let ident = match arg {
         Expression::Value(Value::Name(i)) => i,
         _ => unreachable!(),
@@ -1182,6 +1560,8 @@ where
     Ok((input, expr))
 }
 
+/// A curly-brace-enclosed block of [`Statement`]s (function body, loop body, etc.).
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 pub struct Block {
     statements: Vec<Statement>,
@@ -1193,6 +1573,8 @@ where
 {
     let (input, _) = multispace0(input)?;
     let (input, body) = take_until_balanced("{", "}")(input)?;
+    let body = &body[1..body.len() - 1];
+    //dbg!(input, body);
     let (body, _) = take(1_usize)(body)?;
     //dbg!(body);
     let (_, statements) = many0(parse_statement)(body)?;
@@ -1210,7 +1592,7 @@ where
     //let (input, body) = take_until("#/")(input)?;
     let (input, _) = take_until("#/")(input)?;
     let (input, _) = take("#/".len())(input)?;
-    //dbg!(body);
+    ////dbg!(body);
     //let (_, statements) = many0(parse_statement)(body)?;
 
     //Ok((input, CompoundStatement::DevBlock { body: statements }))
