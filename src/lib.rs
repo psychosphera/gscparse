@@ -4,6 +4,8 @@
 //
 // fix parsing of dev blocks
 //
+// operator precedence is probably all sorts of wrong
+//
 // probably other fixes
 // 
 // tidy up
@@ -751,8 +753,8 @@ where
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 pub struct BinaryExpression {
-    lhs: Box<Expression>,
-    rhs: Box<Expression>,
+    pub lhs: Box<Expression>,
+    pub rhs: Box<Expression>,
 }
 
 /// The building block of a program.
@@ -1422,8 +1424,8 @@ where
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 pub struct Ast {
-    directives: Vec<Directive>,
-    functions: Vec<FunctionDef>,
+    pub directives: Vec<Directive>,
+    pub functions: Vec<FunctionDef>,
 }
 
 /// Parses a script (`.gsc`, `.csc`, etc.) and returns an [`Ast`].
@@ -1499,9 +1501,9 @@ where
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 pub struct FunctionDef {
-    name: Ident,
-    args: ArgsList,
-    body: Block,
+    pub name: Ident,
+    pub args: ArgsList,
+    pub body: Block,
 }
 
 pub fn parse_function_def<'a, E>(input: &'a str) -> IResult<&'a str, FunctionDef, E>
@@ -1564,7 +1566,7 @@ where
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 pub struct Block {
-    statements: Vec<Statement>,
+    pub statements: Vec<Statement>,
 }
 
 pub fn parse_block<'a, E>(input: &'a str) -> IResult<&'a str, Block, E>

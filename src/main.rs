@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use std::ffi::OsString;
 
 use gscparse::{parse_expression, parse_function_def, parse_script, parse_statement};
