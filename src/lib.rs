@@ -1464,6 +1464,19 @@ pub enum Directive {
     UsingAnimtree(String),
 }
 
+impl Directive {
+    pub fn is_include(&self) -> bool {
+        match self {
+            Self::Include(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_using_animtree(&self) -> bool {
+        !self.is_include()
+    }
+}
+
 pub fn parse_directives<'a, E>(input: &'a str) -> IResult<&'a str, Vec<Directive>, E>
 where
   E: ParseError<&'a str>,
