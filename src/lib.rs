@@ -314,11 +314,15 @@ static RESERVED_KEYWORDS: [&str; 11] = [
 /// 
 /// Function names and variable names are both identifiers.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct Ident(String);
 
 impl Ident {
+    pub fn new() -> Self {
+        Self(String::new())
+    }
+
     pub fn try_from_str(s: impl AsRef<str>) -> Option<Self> {
         let s = s.as_ref();
 
