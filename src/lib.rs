@@ -415,8 +415,12 @@ impl ExternalIdent {
     }
 
     pub fn ident(&self) -> &str {
-        let idents = self.0.split("::").collect::<Vec<_>>();
-        idents[1]
+        if self.0.contains("::") {
+            let idents = self.0.split("::").collect::<Vec<_>>();
+            idents[1]
+        } else {
+            self.0.as_str()
+        }
     }
 
     pub fn is_global_namespace(&self) -> bool {
@@ -1465,7 +1469,7 @@ where
 #[derive(Clone, Debug)]
 pub enum Directive {
     Include(String),
-    UsingAnimtree(String),
+    UsingAnimtree(Ident),
 }
 
 impl Directive {
@@ -1501,7 +1505,7 @@ where
             let (line, _) = take_until("\"")(line)?;
             let (line, _) = take(1_usize)(line)?;
             let (_, animtree) = take_until("\"")(line)?;
-            let animtree = Directive::UsingAnimtree(animtree.to_string());
+            let animtree = Directive::UsingAnimtree(Ident::try_from_str(&animtree.to_string()).unwrap());
             directives.push(animtree);
         }
     }
